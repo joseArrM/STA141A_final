@@ -1,0 +1,448 @@
+---
+title: "STA 141a Final"
+author: "Jose Arreola Munoz 916626594"
+date: "2023-05-25"
+output: html_document
+---
+
+Abstract The following report looks to define brain activity and use that information and context of trials to form a predictive model. The aim is to predict whether or not a mouse makes the correct choice in a trial. We discuss more about the nature of the experiments in the introduction.
+
+We explore difference in average spike counts across sessions and find a distinct difference by experiment type. We integrate data to have the features of experiment type, difference in contrast, mouse name, number of brain areas. We form a general linear model due to our finding in data exploration and train our model. We validate this model via confusion matrix. Challenges of using averages presented themselves when applying the trained model to a new set of data. Here we found that consulting with a collaborator in neurology would have been of great use. This lesson is understandable since in practice statisticians collaborate regularly.
+
+## Section 1 Introduction
+
+This project we take 18 session data entries from Steinmetz et al. (2019). The study from where the data comes from conducted several experiments on various mice. The mice are given a visual stimuli and are tasked to choose the higher contrast. Using varying contrast levels the intent is to solicit differing brain activity. In the end the choice resulted in either a negative or positive feedback. Positive being a correct choice and negative being incorrect.
+
+The goal of this report following is to form a predictive model that uses brain activity and experiment conditions to forecast what the brain activity. We become challenged by foundational questions of what brain activity is? How to differentiate between noise and signal. The downsides of certain techniques used in the paper are discussed as we work through the analysis.
+
+first we will conduct exploratory analysis to view commonality and differences across sessions. Next we will implement data integration to form a standard way of combining like data from other sessions. Next we will form a predictive model based on out findings and discuss the implications
+
+```{r, echo=FALSE}
+#chunk settings
+knitr::opts_chunk$set(
+  comment = " ", echo = FALSE, fig.width = 6
+)
+knitr::opts_chunk$set(echo = F)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+```
+
+```{r}
+#library's used
+library(tidyverse)
+library(kableExtra)
+library(zoo)
+library(stats)
+
+```
+
+```{r}
+#loading 18 rds files
+session <- list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('~/R/data/sessions/session',i,'.rds', sep=''))
+}
+
+```
+
+## Section 2 Exploratory Analysis
+
+```{r}
+#Exploratory Data Analysis
+
+n.session=length(session)
+
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+for(i in 1:n.session){
+  tmp = session[[i]]
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+  
+}
+
+```
+
+```{r}
+#Exploratory Data Analysis
+#i describe the data structures, number of neurons, number of trials, stimuli conditions, feedback types
+
+#consulting session
+
+meta %>% 
+  kbl(align = c("c", "c", "c", "c", "c", "c"), caption = "Mice Trial Summary", digits = 3) %>% 
+        kable_classic_2(full_width = F, html_font = "Cambria")
+
+```
+
+The first figure we will discuss is the summary table for all of the sessions. The table reveals important information such as a total of 5 mice. Some mice perform better than others. Moreover, there is a differing number of trials from each mouses individual sessions. Meaning that not only do the 5 mice have different number of trial but each mouse themselves is tested a different number of times. An interpretation for this can be that each mouse has different levels of stamina to conduct trials. Meaning that some mice can test for longer. Alternatively, the less recorded trials can be due to the researchers ending the session due to mice reacting uncooperative or disinterested. In any case the number of trials is an important factor that will directly impact the representation that the prediction model can produce.
+
+Importantly, ,there is a differing number of brain areas and neurons recorded for each mice in each session. In spite of this difference the average success rate for each mouse is fairly consistent throughout. It is possible that the level activity needed to form a correct choice depends on the mouse. Finally, an interesting observations is that the success rate for each mouse steadily increases as they perform more trials
+
+Because of these variations and the high level of brain areas. I will approach this by taking the average spike counts at each trial. My goal is to capture a general pattern of brain activity that leads to a positive feedback. Perhaps this patterns is consistent throughout all mice regardless of number of neurons and brain areas. Additionally, I want to capture the learning process done by mice in the later trials of each session. Finally, I will filter each trial in a session by their experiment type. From the literature, the pairing of contrasts reveals to hold a specific purpose. If the contrasts differ, the experiment type for that trial is called two action forced choice. This means that the mice are tested on their choice to move left or right. If the contrast pairs are both zero, the experiment is called a go/no go type. This type of trial tests the mice's ability to choose to hold and not choose any contrast since they are both zero. Finally, if the contrast are both equal and non-zero, the trial is random. Regardless of their choice in this type of trial the mice will be rewarded 50% of the time.
+
+For the next plots I will apply an average spike rate function to each trial in a session. I will also apply a new feature the each trial to determine the type of experiment. I will then plot the different types of experiments for session 2 "Corri" and for session 15 "Lederberg"
+
+```{r}
+#Exploratory Data Analysis
+#ii explore neural activities in each trial
+
+#modified the consulting code to calculate the spike rate per brain area for each trial 
+#the main point of this modification is to essentially standarize via time intervals. previously we were only able to capture the relative activity accross differnt brain areas
+
+average_spike_rate_area<-function(i.t,this_session){
+
+spk.trial = this_session$spks[[i.t]]
+area= this_session$brain_area
+spk.count=apply(spk.trial,1,sum)
+time_interval <- 0.04 #interval per trial 
+spk.rate <- (spk.count/time_interval)
+spk.rate.tapply=tapply(spk.rate, area, mean)
+return(spk.rate.tapply)
+}
+
+```
+
+```{r}
+get_experiment_type <- function(contrast_left, contrast_right) {
+  if (contrast_left == 0 && contrast_right == 0) {
+    experiment_type <- "Hold Still"
+  } else if (contrast_left > 0 && contrast_right > 0) {
+    experiment_type <- "Random"
+  } else if (contrast_left > contrast_right) {
+    experiment_type <- "2AFC"
+  } else {
+    experiment_type <- "2AFC"
+  }
+  
+  return(experiment_type)
+}
+
+```
+
+```{r}
+session_spike_rate <- function(i.s) {
+  this_session <- session[[i.s]]
+  n.trial <- length(this_session$feedback_type)
+  n.area <- length(unique(this_session$brain_area))
+  
+  # Create a matrix to store the spike rates and additional information
+  session_spike_rate <- matrix(nrow = n.trial, ncol = n.area + 1 + 2 + 1)
+  
+  for (i.t in 1:n.trial) {
+    avg_spike_rate <- average_spike_rate_area(i.t, this_session)
+    avg_spike_rate <- round(avg_spike_rate, digits = 4)
+    
+    session_spike_rate[i.t, ] <- c(
+      avg_spike_rate,
+      this_session$feedback_type[i.t],
+      this_session$contrast_left[i.t],
+      this_session$contrast_right[i.t],
+      get_experiment_type(this_session$contrast_left[i.t], this_session$contrast_right[i.t])
+    )
+  }
+  
+  # Set column names
+  colnames(session_spike_rate) <- c(
+    names(average_spike_rate_area(i.t, this_session)),
+    'feedback',
+    'left_contr.',
+    'right_contr.',
+    'experiment_type'
+  )
+  
+  # Convert to a data frame
+  session_spike_rate <- as_tibble(session_spike_rate)
+  
+  return(session_spike_rate)
+}
+
+
+```
+
+```{r}
+#applying to other sessions
+session_spike_rate_list <- list()  # Create an empty list to store the results
+
+for (i in 1:length(session)) {
+  session_spike_rate_list[[i]] <- session_spike_rate(i)
+}
+
+```
+
+```{r}
+# Filter session_spike_rate_list[[2]] for each experiment type
+random_data <- filter(session_spike_rate_list[[2]], experiment_type == "Random")
+afc_data <- filter(session_spike_rate_list[[2]], experiment_type == "2AFC")
+hold_still_data <- filter(session_spike_rate_list[[2]], experiment_type == "Hold Still")
+
+random_data.15 <- filter(session_spike_rate_list[[15]], experiment_type == "Random")
+afc_data.15 <- filter(session_spike_rate_list[[15]], experiment_type == "2AFC")
+hold_still_data.15 <- filter(session_spike_rate_list[[15]], experiment_type == "Hold Still")
+
+par(mfrow = c(2, 1))
+
+plot(afc_data[, 1:5], main= "2ACF Session 2")
+plot(afc_data.15[, 1:5], main= "2ACF Session 15")
+
+```
+
+------------------------------------------------------------------------
+
+The first plots for 2ACF show a similar co-linear dependence. This implies that certain brain areas fire similarly when presented with making a choice of distinguishing the differing levels of contrast.
+
+```{r}
+par(mfrow = c(2, 1))
+
+plot(hold_still_data[, 1:5], main = "Hold still Session 2")
+plot(hold_still_data.15[, 1:5], main = "Hold still Session 15")
+
+```
+
+------------------------------------------------------------------------
+
+The hold still plots show significantly less co-linear dependence. This implies that the brain areas work to interpret the zero contrasts at different rates. Important to note that VISl, root, and VISpm in session 2 and GPe, LGd, MB show the most linear co-depenced out of the brain areas presented.
+
+```{r}
+par(mfrow = c(2, 1))
+
+plot(random_data.15[, 1:5], main="Random Session 15")
+plot(random_data[, 1:5], main="Random Session 2")
+
+```
+
+------------------------------------------------------------------------
+
+The final plot summarizes the random trials in all of session 2 and 15. The return of a more co-linear dependence returns. This suggests that the 50% correct rate that is the default from this trial type is into affect. Moreover, it implies that the brain areas still work to try to make a choice similar to the 2ACF plots
+
+## Section 3 Data Integration
+
+```{r}
+session_spike_rate <- function(i.s) {
+  this_session <- session[[i.s]]
+  n.trial <- length(this_session$feedback_type)
+  n.area <- length(unique(this_session$brain_area))
+  
+  # Create a matrix to store the spike rates and additional information
+  session_spike_rate <- matrix(nrow = n.trial, ncol = n.area + 1 + 2 + 1)
+  
+  for (i.t in 1:n.trial) {
+    avg_spike_rate <- average_spike_rate_area(i.t, this_session)
+    avg_spike_rate <- round(avg_spike_rate, digits = 4)
+    
+    session_spike_rate[i.t, ] <- c(
+      avg_spike_rate,
+      this_session$feedback_type[i.t],
+      this_session$contrast_left[i.t],
+      this_session$contrast_right[i.t],
+      get_experiment_type(this_session$contrast_left[i.t], this_session$contrast_right[i.t])
+    )
+  }
+  
+  # Set column names
+  colnames(session_spike_rate) <- c(
+    names(average_spike_rate_area(i.t, this_session)),
+    'feedback',
+    'left_contr.',
+    'right_contr.',
+    'experiment_type'
+  )
+  
+  # Convert to a data frame
+  session_spike_rate <- as_tibble(session_spike_rate)
+  
+  return(session_spike_rate)
+}
+
+```
+
+```{r}
+session_spike_rate_list <- list()  # Create an empty list to store the results
+
+for (i in 1:length(session)) {
+  session_spike_rate_list[[i]] <- session_spike_rate(i)
+}
+```
+
+Using the concept of co-linear dependence I integrated data frames across all of the sessions. The key features I want to use for the prediction model are mouse name, contrast difference, total spikes, number of brain areas, experiment type, and feedback. These features build from the previous discussion about mice having differing levels of success. I want to track the possible growth over time as the trials get better and perhaps track how fatigue looks in other mice.
+
+```{r}
+#Data Integration
+#i extract shared patterns and or differences, want to share the information across for the next section of the project
+session_feature <- function(i.s) {
+  this_session <- session[[i.s]]
+  n.trial <- length(this_session$feedback_type)
+  n.area <- length(unique(this_session$brain_area))
+  
+  # Create a matrix to store the features and additional information
+  session_features <- matrix(nrow = n.trial, ncol = 1 + 4 + 1)
+  
+  for (i.t in 1:n.trial) {
+    avg_spike_rate <- average_spike_rate_area(i.t, this_session)
+    avg_spike_rate <- round(avg_spike_rate, digits = 4)
+    
+    session_features[i.t, ] <- c(
+      this_session$mouse_name,
+      this_session$contrast_left[i.t] - this_session$contrast_right[i.t],
+      sum(this_session$spks[[i.t]]),
+      n.area,
+      get_experiment_type(this_session$contrast_left[i.t], this_session$contrast_right[i.t]),
+      this_session$feedback_type[i.t]
+    )
+  }
+  
+  # Set column names
+  colnames(session_features) <- c(
+    'mouse_name',
+    'contrast_diff',
+    'total_spikes',
+    'num_areas',
+    'experiment_type',
+    'feedback'
+  )
+  
+  # Convert to a data frame
+  session_features <- as.data.frame(session_features)
+  
+  return(session_features)
+}
+
+```
+
+```{r}
+# Create an empty list to store the session features
+session_features_list <- list()
+
+# Apply the session_feature function to all sessions
+for (i in 1:length(session)) {
+  session_features_list[[i]] <- session_feature(i)
+}
+
+# Combine the session features into a single data frame
+all_session_features <- do.call(rbind, session_features_list)
+```
+
+```{r}
+# Convert columns to numeric
+all_session_features$contrast_diff <- as.numeric(all_session_features$contrast_diff)
+all_session_features$total_spikes <- as.numeric(all_session_features$total_spikes)
+all_session_features$num_areas <- as.integer(all_session_features$num_areas)
+all_session_features$feedback <- as.factor(all_session_features$feedback)
+# Encode mouse_name and experiment_type as factors
+train_data$mouse_name <- factor(train_data$mouse_name)
+train_data$experiment_type <- factor(train_data$experiment_type)
+
+test_data$mouse_name <- factor(test_data$mouse_name)
+test_data$experiment_type <- factor(test_data$experiment_type)
+
+
+```
+
+## Section 4 Predictive Modeling
+
+General linear model
+
+```{r}
+#Model Training and prediction
+set.seed(68)  # Set a seed for reproducibility
+train_indices <- sample(1:nrow(all_session_features), nrow(all_session_features) * 0.8)  # 80% for training
+train_data <- all_session_features[train_indices, ]
+test_data <- all_session_features[-train_indices, ]
+
+# Step 2: Select input features and target variable
+input_features <- c("mouse_name", "contrast_diff", "total_spikes", "num_areas", "experiment_type")
+target_variable <- "feedback"
+
+# Step 3: Train the prediction model (logistic regression)
+model <- glm(formula = paste("feedback", "~ ."), data = train_data, family = binomial)
+
+# Step 4: Evaluate the model
+predictions <- predict(model, newdata = test_data, type = "response")
+
+
+```
+
+randomly selects 80% of rows from the features data frame, thus leaving 20% as a test sample. We are interested in using experiment_type, diff_contrast, mouse_name, num_brain_areas
+
+evaluating performance of test
+
+```{r}
+# Create confusion matrix
+confusion_matrix <- table(Actual = test_data$feedback, Predicted = ifelse(predictions > 0.5, "1", "-1"))
+
+# Display confusion matrix
+print(confusion_matrix)
+
+```
+
+The model produceed appears to have performed well accross the sessions. At the moment is difficult to tell how each seaasion weighed in the overall performance of the prediction model.
+
+## Section 5 Prediction Performance
+
+```{r}
+test <- list()
+for(i in 1:2){
+  test[[i]]=readRDS(paste('~/R/data/test/test',i,'.rds', sep=''))
+}
+```
+
+```{r}
+test_feature_list <- list()  # Create an empty list to store the results
+
+for (i in 1:length(test)) {
+  test_feature_list[[i]] <- session_feature(i)
+}
+```
+
+```{r}
+# Combine the session features into a single data frame
+all_test_features <- do.call(rbind, test_feature_list)
+
+```
+
+```{r}
+# Convert columns to numeric
+all_test_features$contrast_diff <- as.numeric(all_test_features$contrast_diff)
+all_test_features$total_spikes <- as.numeric(all_test_features$total_spikes)
+all_test_features$num_areas <- as.integer(all_test_features$num_areas)
+
+# Encode mouse_name and experiment_type as factors
+all_test_features$mouse_name <- factor(all_test_features$mouse_name)
+all_test_features$experiment_type <- factor(all_test_features$experiment_type)
+
+# Make predictions on the test data using the trained model
+test_predictions <- predict(model, newdata = all_test_features, type = "response")
+
+```
+
+```{r}
+# Calculate evaluation metrics
+actual_values <- test_data$feedback  # Actual values from the test dataset
+predicted_values <- ifelse(predictions > 0.5, 1, -1)  # Convert probabilities to class labels
+
+# Calculate accuracy
+accuracy <- sum(actual_values == predicted_values) / length(actual_values)
+
+confusion_matrix <- table(actual_values, predicted_values)
+print(confusion_matrix)
+
+```
+
+## Section 6 Discussion 
+
+Applying the test data to the prediction model revealed that I built a poor performing model. About half of the time the prediction model was correct. In retrospect the decision to average everything out is not a wise decision. It makes sense to get a feel of the data but it fails to take into consideration the impact that neurons have at the small scale. In addition I should have applied the use of time relative to the average firing rate. The timming of things is an important feature that I didn't consider.
+
+Acknowledgements The help of a community was used in the making of this report. Without their help I would not have been able to degug, generate new ideas, and improve the story of this report. In no particular order Adam Hetherwick,Sung Woo-Bak, Jon Casas-Ramirez, Mr. Chen Qian, Dr.Shizhe Chen, & last but not least Chat GPT.
+
+## Code Appendix
